@@ -1,3 +1,6 @@
+# Dockerfile para Bot WhatsApp - Delegado Bruno Lima
+# Otimizado para Render Free Tier
+
 FROM node:18-alpine
 
 # Criar diretório da aplicação
@@ -12,8 +15,11 @@ RUN npm install --only=production
 # Copiar código da aplicação
 COPY . .
 
-# Expor porta
+# Define variáveis de ambiente padrão
+ENV NODE_ENV=production
+
+# Expor porta (Render injeta PORT automaticamente)
 EXPOSE 10000
 
 # Comando para iniciar
-CMD [ "node", "bot.js" ]
+CMD ["node", "bot.js"]
