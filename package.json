@@ -1,0 +1,27 @@
+{
+  "name": "whatsapp-bot-brunolima",
+  "version": "1.0.0",
+  "description": "Bot WhatsApp para equipe do Delegado Bruno Lima - Gestão de denúncias de maus-tratos a animais",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "node --watch bot.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "bot",
+    "evolution-api",
+    "gemini",
+    "animal-protection"
+  ],
+  "author": "Equipe Bruno Lima",
+  "license": "MIT",
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "axios": "^1.7.7",
+    "express": "^4.21.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
