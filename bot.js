@@ -2,7 +2,7 @@
  * Bot WhatsApp - Equipe Delegado Bruno Lima
  * Gestão de denúncias de maus-tratos a animais
  *
- * Integração: Evolution API + Google Gemini
+ * Integração: Z-API + Google Gemini
  */
 
 const express = require('express');
@@ -15,10 +15,10 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const config = {
   port: process.env.PORT || 3000,
-  evolution: {
-    apiUrl: process.env.EVOLUTION_API_URL,
-    apiKey: process.env.EVOLUTION_API_KEY,
-    instance: process.env.EVOLUTION_INSTANCE
+  zapi: {
+    instanceId: process.env.ZAPI_INSTANCE_ID,
+    token: process.env.ZAPI_TOKEN,
+    baseUrl: 'https://api.z-api.io'
   },
   gemini: {
     apiKey: process.env.GEMINI_API_KEY,
@@ -149,6 +149,11 @@ app.use(express.json());
 // Histórico de conversas em memória
 const conversationHistory = new Map();
 
+// Números ativados (phone -> timestamp da última atividade)
+const activeUsers = new Map();
+const ACTIVATION_PHRASE = 'ajuda equipe';
+const ACTIVATION_TIMEOUT = 30 * 60 * 1000; // 30 minutos
+
 // Estatísticas
 const stats = {
   startTime: new Date(),
@@ -256,6 +261,24 @@ function cleanOldHistories() {
 // Limpa históricos a cada hora
 setInterval(cleanOldHistories, 60 * 60 * 1000);
 
+/**
+ * Desativa números inativos há mais de 30 minutos
+ */
+function cleanInactiveUsers() {
+  const now = Date.now();
+
+  for (const [phone, lastActivity] of activeUsers.entries()) {
+    if (now - lastActivity > ACTIVATION_TIMEOUT) {
+      activeUsers.delete(phone);
+      conversationHistory.delete(phone);
+      console.log(`🔴 Número desativado por inatividade (30 min): ${phone}`);
+    }
+  }
+}
+
+// Verifica inatividade a cada minuto
+setInterval(cleanInactiveUsers, 60 * 1000);
+
 // ============================================
 // INTEGRAÇÃO GEMINI
 // ============================================
@@ -314,28 +337,28 @@ Responda à mensagem do usuário de forma natural e humanizada.`;
 }
 
 // ============================================
-// INTEGRAÇÃO EVOLUTION API
+// INTEGRAÇÃO Z-API
 // ============================================
 
 /**
- * Envia mensagem via Evolution API
+ * Envia mensagem via Z-API
  */
 async function sendMessage(chatId, message) {
-  if (!config.evolution.apiUrl || !config.evolution.apiKey) {
+  if (!config.zapi.instanceId || !config.zapi.token) {
     console.log('📤 [SIMULAÇÃO] Enviando para', chatId, ':', message);
     return { success: true, simulated: true };
   }
 
   try {
-    const url = `${config.evolution.apiUrl}/message/sendText/${config.evolution.instance}`;
+    const url = `${config.zapi.baseUrl}/instances/${config.zapi.instanceId}/token/${config.zapi.token}/send-text`;
 
     const response = await axios.post(url, {
-      number: chatId,
-      text: message
+      phone: chatId,
+      message: message
     }, {
       headers: {
         'Content-Type': 'application/json',
-        'apikey': config.evolution.apiKey
+        'Client-Token': config.zapi.token
       }
     });
 
@@ -352,44 +375,62 @@ async function sendMessage(chatId, message) {
 // ============================================
 
 /**
- * Processa mensagem recebida
+ * Processa mensagem recebida (formato Z-API)
  */
 async function processMessage(data) {
   try {
-    // Extrai dados da mensagem (formato Evolution API)
-    const messageData = data.data || data;
-
     // Ignora mensagens enviadas por nós mesmos
-    if (messageData.key?.fromMe) {
+    if (data.fromMe) {
       return;
     }
 
-    // Ignora status/stories
-    if (messageData.key?.remoteJid?.includes('status@broadcast')) {
+    // Ignora grupos (opcional)
+    if (data.isGroup) {
       return;
     }
 
-    const chatId = messageData.key?.remoteJid;
-    const message = messageData.message?.conversation ||
-                   messageData.message?.extendedTextMessage?.text ||
-                   messageData.message?.imageMessage?.caption ||
-                   messageData.message?.videoMessage?.caption;
+    const chatId = data.phone;
+    const senderName = data.senderName || data.chatName;
 
-    // Ignora mensagens vazias ou sem texto
-    if (!chatId || !message) {
+    // Extrai texto da mensagem (Z-API envia em diferentes campos conforme o tipo)
+    const message = data.text?.message ||
+                   data.image?.caption ||
+                   data.video?.caption ||
+                   null;
+
+    if (!chatId) return;
+
+    // Verifica frase de ativação
+    if (message && message.trim().toLowerCase() === ACTIVATION_PHRASE) {
+      activeUsers.set(chatId, Date.now());
+      console.log(`🟢 Número ativado: ${chatId} (${senderName || 'sem nome'})`);
+      await sendMessage(chatId, 'Olá! Pode me mandar a sua dúvida');
+      stats.messagesReceived++;
+      stats.messagesProcessed++;
+      return;
+    }
+
+    // Ignora quem não ativou o bot
+    if (!activeUsers.has(chatId)) {
+      return;
+    }
+
+    // Atualiza timestamp de atividade
+    activeUsers.set(chatId, Date.now());
+
+    // Ignora mensagens sem texto
+    if (!message) {
       // Se for imagem/vídeo sem caption, pode ser uma denúncia
-      if (messageData.message?.imageMessage || messageData.message?.videoMessage) {
+      if (data.image || data.video) {
         const response = await generateResponse(
           chatId,
           '[Usuário enviou uma imagem/vídeo]',
-          messageData.pushName
+          senderName
         );
         await sendMessage(chatId, response);
       }
       return;
     }
-
-    const senderName = messageData.pushName;
 
     console.log(`📩 Mensagem de ${senderName || chatId}: ${message.substring(0, 50)}...`);
     stats.messagesReceived++;
@@ -411,14 +452,11 @@ async function processMessage(data) {
 // ROTAS EXPRESS
 // ============================================
 
-// Webhook para Evolution API
+// Webhook para Z-API
 app.post('/webhook', async (req, res) => {
   try {
-    const event = req.body.event || req.body.action;
-
-    // Processa apenas mensagens recebidas
-    if (event === 'messages.upsert' || event === 'MESSAGES_UPSERT' || req.body.data?.message) {
-      // Não bloqueia a resposta
+    // Z-API envia mensagens recebidas com tipo "ReceivedCallback"
+    if (req.body && !req.body.fromMe) {
       setImmediate(() => processMessage(req.body));
     }
 
@@ -429,13 +467,13 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// Health check para Koyeb
+// Health check para Render
 app.get('/health', (req, res) => {
   const healthy = !!model;
   res.status(healthy ? 200 : 503).json({
     status: healthy ? 'healthy' : 'unhealthy',
     gemini: !!model,
-    evolution: !!(config.evolution.apiUrl && config.evolution.apiKey),
+    zapi: !!(config.zapi.instanceId && config.zapi.token),
     uptime: Math.floor((Date.now() - stats.startTime.getTime()) / 1000)
   });
 });
@@ -445,6 +483,7 @@ app.get('/stats', (req, res) => {
   res.json({
     ...stats,
     uptime: Math.floor((Date.now() - stats.startTime.getTime()) / 1000),
+    activeUsers: activeUsers.size,
     activeConversations: conversationHistory.size,
     memoryUsage: process.memoryUsage()
   });
@@ -482,11 +521,11 @@ app.listen(config.port, () => {
   initGemini();
 
   // Verifica configurações
-  if (!config.evolution.apiUrl) {
-    console.log('⚠️  EVOLUTION_API_URL não configurada (modo simulação)');
+  if (!config.zapi.instanceId) {
+    console.log('⚠️  ZAPI_INSTANCE_ID não configurada (modo simulação)');
   }
-  if (!config.evolution.apiKey) {
-    console.log('⚠️  EVOLUTION_API_KEY não configurada (modo simulação)');
+  if (!config.zapi.token) {
+    console.log('⚠️  ZAPI_TOKEN não configurado (modo simulação)');
   }
 
   console.log('='.repeat(50));
